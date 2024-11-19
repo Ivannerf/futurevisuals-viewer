@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>360 Panorama Viewer</title>
+    <!-- Pannellum Library -->
+    <script src="https://cdn.pannellum.org/2.5/pannellum.js"></script>
+    <link rel="stylesheet" href="https://cdn.pannellum.org/2.5/pannellum.css">
+
+    <style>
+        /* Inline styles for floorplan and coordinate buttons */
+        #panorama {
+            width: 100%;
+            height: 70vh;
+        }
+        #loading {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 20px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #floorplan-container {
+            position: relative;
+            margin: 20px 0;
+        }
+        #floorplan {
+            max-width: 100%;
+            height: auto;
+        }
+        .coordinate-button {
+            width: 10px;
+            height: 10px;
+            background: red;
+            border-radius: 50%;
+            position: absolute;
+            cursor: pointer;
+        }
+        .hotspot-marker {
+            width: 20px;
+            height: 20px;
+            background: blue;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <!-- Panorama Viewer -->
+    <div id="panorama"></div>
+
+    <!-- Loading Indicator -->
+    <div id="loading">Laddar...</div>
+
+    <!-- Floorplan Container -->
+    <div id="floorplan-container">
+        <img id="floorplan" src="" alt="Floorplan">
+    </div>
+
+    <script>
+        // Airtable API endpoint and API key
+        const API_URL = 'https://api.airtable.com/v0/app3A7tfaIiMuhhfP/tblYGh8Y2W53IQnAt?view=viwCishvXXim4le7p';
+        const API_KEY = 'patp7Yw48wCEfVxLW.6a81dbf17fcb007f50b45fc51a1c2fd1c0d71ed20967e194261e473b3cded220';
+
+        // Global variables
+        let hotspotsData = {};
+        let panoramas = [];
+        let lastYaw = 0;
+        let lastPitch = 0;
+
+        // Fetch ROOM_KEY from query parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const ROOM_KEY = urlParams.get('key') || 'DEFAULT_KEY';
+
+        async function fetchDataFromAirtable() {
+            try {
+                const response = await fetch(API_URL, {
+                    headers: { Authorization: `Bearer ${API_KEY}` },
+                });
+                const data = await response.json();
+
+                const filteredRecords = data.records.filter(record => record.fields.ROOM_KEY === ROOM_KEY);
+
+                if (filteredRecords.length === 0) {
+                    console.error(`No records found for ROOM_KEY: ${ROOM_KEY}`);
+                    return;
+                }
+
+                panoramas = filteredRecords.map(record => {
+                    const floorplanUrl = record.fields.Floorplan?.[0]?.url || null;
+
+                    const panoramaData = ['A', 'B', 'C'].map(key => {
+                        const url = record.fields[key]?.[0]?.url || null;
+                        const coordinates = parseCoordinates(record.fields[`${key}_COORDINATES`] || "");
+
+                        return coordinates ? { id: `${record.fields.ID}_${key}`, url, coordinates } : null;
+                    }).filter(Boolean);
+
+                    return {
+                        id: record.fields.ID,
+                        floorplanUrl,
+                        panoramas: panoramaData,
+                    };
+                });
+
+                if (panoramas.length > 0) {
+                    loadFloorplanAndPanoramas(panoramas[0]);
+                }
+            } catch (error) {
+                console.error("Error fetching data from Airtable:", error);
+            }
+        }
+
+        function parseCoordinates(coordString) {
+            const regex = /^X(\d+)Y(\d+)$/;
+            const match = coordString.match(regex);
+            if (match) {
+                const x = parseInt(match[1], 10);
+                const y = parseInt(match[2], 10);
+                return { x, y };
+            }
+            return null;
+        }
+
+        function loadFloorplanAndPanoramas(record) {
+            const floorplanUrl = record.floorplanUrl;
+            const panoramaList = record.panoramas;
+
+            if (floorplanUrl) {
+                const floorplanImage = document.getElementById('floorplan');
+                floorplanImage.src = floorplanUrl;
+
+                floorplanImage.onload = function () {
+                    panoramaList.forEach(panorama => {
+                        createCoordinateButton(panorama.coordinates, panorama.url, panorama.id);
+                    });
+                };
+            }
+
+            if (panoramaList.length > 0) {
+                loadPanorama(panoramaList[0].url, calculateHotspots(panoramaList[0], panoramaList), panoramaList[0].id);
+            }
+        }
+
+        function loadPanorama(panoramaUrl, hotspots, activePanoramaId) {
+            const viewerContainer = document.getElementById('panorama');
+            if (viewerContainer.viewer) {
+                const viewer = viewerContainer.viewer;
+                lastYaw = viewer.getYaw();
+                lastPitch = viewer.getPitch();
+                viewer.destroy();
+            }
+
+            const viewer = pannellum.viewer('panorama', {
+                type: "equirectangular",
+                panorama: panoramaUrl,
+                autoLoad: true,
+                hotSpots: hotspots,
+                yaw: lastYaw,
+                pitch: lastPitch,
+            });
+
+            viewerContainer.viewer = viewer;
+        }
+
+        function calculateHotspots(currentPanorama, allPanoramas) {
+            const currentCoords = currentPanorama.coordinates;
+            return allPanoramas
+                .filter(panorama => panorama.id !== currentPanorama.id)
+                .map(panorama => {
+                    const deltaX = panorama.coordinates.x - currentCoords.x;
+                    const deltaY = panorama.coordinates.y - currentCoords.y;
+                    const yaw = Math.atan2(deltaX, deltaY) * (180 / Math.PI);
+
+                    return {
+                        pitch: 0,
+                        yaw,
+                        type: "custom",
+                        cssClass: "hotspot-marker",
+                        text: `Go to ${panorama.id}`,
+                        panoramaName: panorama.id,
+                        clickHandlerFunc: () => {
+                            loadPanorama(panorama.url, calculateHotspots(panorama, allPanoramas), panorama.id);
+                        },
+                    };
+                });
+        }
+
+        function createCoordinateButton(coordinates, panoramaUrl, fileName) {
+            const floorplan = document.getElementById('floorplan');
+            const floorplanWidth = floorplan.offsetWidth;
+            const floorplanHeight = floorplan.offsetHeight;
+
+            const xPos = (coordinates.x / 100) * floorplanWidth;
+            const yPos = floorplanHeight - (coordinates.y / 100) * floorplanHeight;
+
+            const button = document.createElement('div');
+            button.classList.add('coordinate-button');
+            button.style.left = `${xPos - 5}px`;
+            button.style.top = `${yPos - 5}px`;
+            button.dataset.fileName = fileName;
+
+            button.onclick = function () {
+                const target = panoramas.flatMap(p => p.panoramas).find(p => p.id === fileName);
+                if (target) {
+                    loadPanorama(target.url, calculateHotspots(target, panoramas.flatMap(p => p.panoramas)), target.id);
+                }
+            };
+
+            document.getElementById('floorplan-container').appendChild(button);
+        }
+
+        // Initialize the viewer
+        fetchDataFromAirtable();
+    </script>
+</body>
+</html>
